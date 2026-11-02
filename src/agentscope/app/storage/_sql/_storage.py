@@ -59,6 +59,8 @@ from ._tables import (
     SOPRunRow,
     TeamRow,
     VoiceProfileRow,
+    TaskQueueRow,
+    AuditLogRow,
 )
 from ....credential import CredentialBase
 from ....message import Msg
@@ -2336,3 +2338,168 @@ class AsyncSQLAlchemyStorage(StorageBase):
             )
             await sess.commit()
         return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Multi-tenant Task Queue (SELECT ... FOR UPDATE SKIP LOCKED)
+    # ------------------------------------------------------------------
+    async def enqueue_task(
+        self,
+        task_id: str,
+        user_id: str,
+        session_id: str,
+        agent_id: str,
+        payload: dict[str, Any],
+        tenant_id: str = "default",
+    ) -> None:
+        """Enqueue a background task into the database task queue."""
+        now = _utcnow()
+        async with self._session() as sess:
+            row = TaskQueueRow(
+                id=task_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                status="pending",
+                payload=payload,
+                created_at=now,
+                updated_at=now,
+            )
+            sess.add(row)
+            await sess.commit()
+
+    async def claim_next_task(
+        self,
+        worker_id: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically claim the next pending task using SKIP LOCKED if supported.
+
+        Uses PostgreSQL/MySQL native row-level concurrency lock to prevent
+        race conditions without needing Redis.
+        """
+        async with self._session() as sess:
+            stmt = sa.select(TaskQueueRow).where(TaskQueueRow.status == "pending")
+            if tenant_id:
+                stmt = stmt.where(TaskQueueRow.tenant_id == tenant_id)
+            stmt = stmt.order_by(TaskQueueRow.created_at.asc()).limit(1)
+
+            # Check if dialect supports FOR UPDATE SKIP LOCKED
+            dialect_name = sess.bind.dialect.name if sess.bind else ""
+            if dialect_name in ("postgresql", "mysql"):
+                stmt = stmt.with_for_update(skip_locked=True)
+
+            res = await sess.execute(stmt)
+            row = res.scalar_one_or_none()
+            if row is None:
+                return None
+
+            now = _utcnow()
+            row.status = "claimed"
+            row.claimed_by = worker_id
+            row.claimed_at = now
+            row.updated_at = now
+            await sess.commit()
+            return {
+                "id": row.id,
+                "tenant_id": row.tenant_id,
+                "user_id": row.user_id,
+                "session_id": row.session_id,
+                "agent_id": row.agent_id,
+                "payload": row.payload,
+            }
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        status: str,
+    ) -> None:
+        """Update task queue status ('completed' or 'failed')."""
+        async with self._session() as sess:
+            stmt = (
+                sa.update(TaskQueueRow)
+                .where(TaskQueueRow.id == task_id)
+                .values(status=status, updated_at=_utcnow())
+            )
+            await sess.execute(stmt)
+            await sess.commit()
+
+    # ------------------------------------------------------------------
+    # Structured Audit Logging & Token Governance
+    # ------------------------------------------------------------------
+    async def record_audit_log(
+        self,
+        log_id: str,
+        user_id: str,
+        session_id: str,
+        agent_id: str,
+        event_type: str,
+        model_name: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        latency_ms: float = 0.0,
+        cost: float = 0.0,
+        status: str = "success",
+        details: dict[str, Any] | None = None,
+        tenant_id: str = "default",
+    ) -> None:
+        """Record an execution trace with token governance data."""
+        now = _utcnow()
+        async with self._session() as sess:
+            row = AuditLogRow(
+                id=log_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                event_type=event_type,
+                model_name=model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                latency_ms=latency_ms,
+                cost=cost,
+                status=status,
+                details=details,
+                created_at=now,
+            )
+            sess.add(row)
+            await sess.commit()
+
+    async def list_audit_logs(
+        self,
+        tenant_id: str,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query audit records filtered by tenant for observability and billing."""
+        async with self._session() as sess:
+            stmt = (
+                sa.select(AuditLogRow)
+                .where(AuditLogRow.tenant_id == tenant_id)
+            )
+            if session_id:
+                stmt = stmt.where(AuditLogRow.session_id == session_id)
+            stmt = stmt.order_by(AuditLogRow.created_at.desc()).limit(limit)
+            res = await sess.execute(stmt)
+            rows = res.scalars().all()
+            return [
+                {
+                    "id": r.id,
+                    "tenant_id": r.tenant_id,
+                    "user_id": r.user_id,
+                    "session_id": r.session_id,
+                    "agent_id": r.agent_id,
+                    "event_type": r.event_type,
+                    "model_name": r.model_name,
+                    "prompt_tokens": r.prompt_tokens,
+                    "completion_tokens": r.completion_tokens,
+                    "total_tokens": r.total_tokens,
+                    "latency_ms": r.latency_ms,
+                    "cost": r.cost,
+                    "status": r.status,
+                    "details": r.details,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]

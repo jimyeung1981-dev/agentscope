@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Shared FastAPI dependencies for the agentscope app."""
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from .workspace_manager import WorkspaceManagerBase
 from .channel import (
@@ -27,34 +27,78 @@ from ._types import AgentMiddlewareFactory, AgentToolFactory
 from .hub import MCPHubBase, SkillHubBase
 from .message_bus import MessageBus
 from .rag.blob_store import BlobStoreBase
+import base64
+import json
+from .access import TenantIdentity, set_current_tenant
 from .rag.knowledge_base_manager import KnowledgeBaseManagerBase
 from .storage import StorageBase
 from ..rag import ChunkerBase, ParserBase
 
 
-async def get_current_user_id(
-    x_user_id: str = Header(
-        description="Caller's user ID. "
-        "Temporary header-based identity; will be replaced by JWT auth.",
-    ),
-) -> str:
-    """Return the caller's user ID from the ``X-User-ID`` request header.
+def _parse_jwt_payload(token: str) -> dict:
+    """Best-effort decode of JWT payload without verifying signature."""
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            decoded = base64.urlsafe_b64decode(padded)
+            return json.loads(decoded)
+    except Exception:
+        pass
+    return {}
 
-    Args:
-        x_user_id (`str`): Value of the ``X-User-ID`` header.
 
-    Returns:
-        `str`: The authenticated user ID.
+async def get_current_identity(
+    request: Request,
+    x_user_id: str | None = Header(None, description="Caller's user ID"),
+    x_tenant_id: str | None = Header(None, description="Caller's tenant ID"),
+    authorization: str | None = Header(None, description="Bearer JWT token"),
+) -> TenantIdentity:
+    """Resolve full multi-tenant identity from JWT or request headers.
 
-    Raises:
-        `HTTPException`: 401 if the header is missing or empty.
+    Extracts `user_id` (or `sub`), `tenant_id`, and `role`. Sets the active
+    tenant context variable so downstream services and sandboxes can access it.
     """
-    if not x_user_id:
+    user_id = x_user_id if isinstance(x_user_id, str) else None
+    tenant_id = x_tenant_id if isinstance(x_tenant_id, str) else None
+    role = "member"
+
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        claims = _parse_jwt_payload(token)
+        if claims:
+            user_id = user_id or claims.get("sub") or claims.get("user_id")
+            tenant_id = tenant_id or claims.get("tenant_id") or claims.get("org_id")
+            role = claims.get("role", role)
+
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="X-User-ID header is required.",
+            detail="User identity is required (via X-User-ID header or Bearer JWT).",
         )
-    return x_user_id
+
+    resolved_tenant_id = tenant_id or "default"
+    identity = TenantIdentity(
+        tenant_id=resolved_tenant_id,
+        user_id=user_id,
+        role=role,
+    )
+    set_current_tenant(identity)
+    return identity
+
+
+async def get_current_tenant_id(
+    identity: TenantIdentity = Depends(get_current_identity),
+) -> str:
+    """Return the caller's tenant ID."""
+    return identity.tenant_id
+
+
+async def get_current_user_id(
+    identity: TenantIdentity = Depends(get_current_identity),
+) -> str:
+    """Return the caller's user ID, preserving backwards-compatibility."""
+    return identity.user_id
 
 
 async def get_storage(request: Request) -> StorageBase:

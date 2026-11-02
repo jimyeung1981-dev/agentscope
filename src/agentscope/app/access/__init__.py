@@ -20,6 +20,11 @@ from ._policy import (
     ResourcePermission,
     ResourceRef,
 )
+from ._tenant import (
+    TenantIdentity,
+    get_current_tenant,
+    set_current_tenant,
+)
 
 __all__ = [
     "DenyAllResourceAccessPolicy",
@@ -27,4 +32,7 @@ __all__ = [
     "ResourceKind",
     "ResourcePermission",
     "ResourceRef",
+    "TenantIdentity",
+    "get_current_tenant",
+    "set_current_tenant",
 ]

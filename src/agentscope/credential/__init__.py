@@ -14,6 +14,11 @@ from ._typesafe import TypeSafeCredential
 from ._xai import XAICredential
 from ._volcengine import VolcengineCredential
 from ._factory import CredentialFactory
+from ._vault import (
+    PlatformCredentialVault,
+    CredentialSummary,
+    CredentialRecord,
+)
 
 
 __all__ = [
@@ -30,4 +35,7 @@ __all__ = [
     "XAICredential",
     "VolcengineCredential",
     "CredentialFactory",
+    "PlatformCredentialVault",
+    "CredentialSummary",
+    "CredentialRecord",
 ]

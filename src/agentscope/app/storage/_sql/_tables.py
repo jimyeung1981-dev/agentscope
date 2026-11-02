@@ -31,8 +31,10 @@ from typing import Any, ClassVar
 from sqlalchemy import (
     JSON,
     DateTime,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
 )
@@ -482,4 +484,149 @@ class MessageRow(_Base):
 
     __table_args__ = (
         Index("ix_messages_session_created", "session_id", "created_at"),
+    )
+
+
+class TaskQueueRow(_Base):
+    """PostgreSQL-native lockless task queue.
+
+    Enables multi-instance cluster coordination with
+    `SELECT ... FOR UPDATE SKIP LOCKED` without requiring Redis.
+    """
+
+    __tablename__ = "task_queue"
+
+    id: Mapped[str] = mapped_column(String(_ID_LEN), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        default="default",
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    session_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    claimed_by: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        index=True,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(),
+        nullable=False,
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(),
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        Index("ix_task_queue_status_created", "status", "created_at"),
+        Index("ix_task_queue_tenant_status", "tenant_id", "status"),
+    )
+
+
+class AuditLogRow(_Base):
+    """Structured audit and token governance log.
+
+    Persists execution traces, token consumption, latency, and costs
+    per tenant for compliance, billing, and observability.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(_ID_LEN), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        default="default",
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    session_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(_ID_LEN),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(
+        Integer(),
+        nullable=False,
+        default=0,
+    )
+    completion_tokens: Mapped[int] = mapped_column(
+        Integer(),
+        nullable=False,
+        default=0,
+    )
+    total_tokens: Mapped[int] = mapped_column(
+        Integer(),
+        nullable=False,
+        default=0,
+    )
+    latency_ms: Mapped[float] = mapped_column(
+        Float(),
+        nullable=False,
+        default=0.0,
+    )
+    cost: Mapped[float] = mapped_column(
+        Float(),
+        nullable=False,
+        default=0.0,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="success",
+        index=True,
+    )
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(),
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        Index("ix_audit_logs_tenant_created", "tenant_id", "created_at"),
+        Index("ix_audit_logs_session_created", "session_id", "created_at"),
     )

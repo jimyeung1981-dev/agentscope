@@ -289,3 +289,41 @@ class S3BlobStore(BlobStoreBase):
                 if code in {"404", "NoSuchKey", "NotFound"}:
                     return False
                 raise
+
+    async def generate_presigned_upload_url(
+        self,
+        key: str,
+        tenant_id: str | None = None,
+        content_type: str | None = None,
+        expires_in: int = 3600,
+    ) -> dict[str, Any]:
+        """Generate a presigned PUT URL for client-side direct upload.
+
+        Allows clients to upload large documents (PDFs, code bundles) directly
+        to S3, avoiding memory exhaustion and network saturation on the API server.
+        Partitions assets by tenant_id when provided.
+        """
+        scoped_key = (
+            f"tenants/{tenant_id}/{key.lstrip('/')}"
+            if tenant_id
+            else key.lstrip("/")
+        )
+        params: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": scoped_key,
+        }
+        if content_type:
+            params["ContentType"] = content_type
+
+        async with self._client() as s3:
+            url = await s3.generate_presigned_url(
+                ClientMethod="put_object",
+                Params=params,
+                ExpiresIn=expires_in,
+            )
+            return {
+                "upload_url": url,
+                "uri": f"{_SCHEME}{self._bucket}/{scoped_key}",
+                "key": scoped_key,
+                "expires_in": expires_in,
+            }

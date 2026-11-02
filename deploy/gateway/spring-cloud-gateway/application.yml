@@ -1,0 +1,39 @@
+# Spring Cloud Gateway configuration for decoupled AgentScope Managed Agent cluster
+server:
+  port: 8080
+
+spring:
+  application:
+    name: agentscope-api-gateway
+  cloud:
+    gateway:
+      httpclient:
+        connect-timeout: 10000
+        response-timeout: 300s # Support long reasoning cycles for AI Agents
+        pool:
+          max-connections: 1000
+      routes:
+        # 1. Real-time Event Streaming Route (SSE No-buffering)
+        - id: agentscope-session-stream
+          uri: lb://agentscope-backend-cluster # or http://agentscope-managed-agent:8000
+          predicates:
+            - Path=/sessions/*/stream
+          filters:
+            - name: PreserveHostHeader
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST
+
+        # 2. General Agent Operations Route
+        - id: agentscope-managed-agent
+          uri: lb://agentscope-backend-cluster
+          predicates:
+            - Path=/chat/**, /sessions/**, /agents/**, /workspace/**, /knowledge/**, /sops/**, /models/**
+          filters:
+            - name: PreserveHostHeader
+            # Example JWT claim filter: extracts claims and passes them downstream
+            - AddRequestHeader=X-Forwarded-Gateway, SpringCloudGateway
+
+      # Sticky Session Configuration using session_id
+      loadbalancer:
+        configurations: sticky-session
+        sticky-session:
+          instance-id-cookie-name: AGENTSCOPE_INSTANCE
